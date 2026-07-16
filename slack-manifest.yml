@@ -1,0 +1,46 @@
+display_information:
+  name: PullPod
+  description: A pod for every pull request — GitHub PR collaboration in Slack.
+  background_color: "#1b1f24"
+features:
+  bot_user:
+    display_name: PullPod
+    always_online: true
+  app_home:
+    home_tab_enabled: true
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  slash_commands:
+    - command: /pullpod
+      url: https://REPLACE_ME.ngrok.app/slack/events
+      description: Manage your PullPod settings and PRs
+      usage_hint: link | pause | resume | timeslot | repos | status | help
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - channels:manage
+      - channels:read
+      - channels:join
+      - chat:write
+      - chat:write.customize
+      - users:read
+      - users:read.email
+      - commands
+      - im:write
+      - pins:write
+      - bookmarks:write
+      - reactions:write
+settings:
+  event_subscriptions:
+    request_url: https://REPLACE_ME.ngrok.app/slack/events
+    bot_events:
+      - app_home_opened
+      - member_joined_channel
+      - message.channels
+  interactivity:
+    is_enabled: true
+    request_url: https://REPLACE_ME.ngrok.app/slack/events
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
