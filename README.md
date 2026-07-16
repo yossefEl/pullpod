@@ -5,7 +5,8 @@
 reviews, and CI status — then archives itself on merge.
 
 📋 See [plan.md](plan.md) for the full technical plan (architecture, data model, event flows,
-phased roadmap).
+phased roadmap), and [docs/scaling.md](docs/scaling.md) for the architecture decisions,
+the deliberately-deferred alternatives (Redis/BullMQ, multi-tenancy, HA), and how to scale up.
 
 ## What it does
 

@@ -31,6 +31,12 @@ Being internal-only simplifies a lot: bot token and GitHub App installation ID l
 no OAuth install flow, no tenant isolation. We still keep an `installations` row so the schema
 doesn't need surgery if this ever goes multi-tenant.
 
+> **Scaling & alternatives:** every simplification here (single-tenant, pg-boss instead of
+> Redis, single Cloud Run instance, in-process cron/locks) is recorded in
+> [`docs/scaling.md`](docs/scaling.md) along with the signal that means "revisit this" and the
+> migration path back to the heavier option. Read it before running more than one instance —
+> the per-PR mutex, Slack throttle, and cron all assume a single process.
+
 ---
 
 ## 2. Architecture
