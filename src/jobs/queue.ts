@@ -1,10 +1,6 @@
-import { Queue } from 'bullmq';
-import { Redis } from 'ioredis';
+import PgBoss from 'pg-boss';
 import { config } from '../config.js';
-
-export const connection = new Redis(config.REDIS_URL, {
-  maxRetriesPerRequest: null,
-});
+import { logger } from '../logger.js';
 
 export interface GithubEventJob {
   deliveryId: string;
@@ -12,18 +8,43 @@ export interface GithubEventJob {
   payload: any;
 }
 
-export const EVENTS_QUEUE = 'pullpod:github-events';
+export const EVENTS_QUEUE = 'github-events';
 
-export const eventsQueue = new Queue<GithubEventJob>(EVENTS_QUEUE, { connection });
+// pg-boss runs the job queue inside the same Postgres we already use — no Redis.
+// It manages its own `pgboss` schema. A small pool is plenty at our volume.
+const isLocal = config.DATABASE_URL.includes('localhost');
+export const boss = new PgBoss({
+  connectionString: config.DATABASE_URL,
+  ssl: isLocal ? undefined : { rejectUnauthorized: false },
+  max: 4,
+  schema: 'pgboss',
+});
+
+boss.on('error', (err) => logger.error({ err }, 'pg-boss error'));
+
+let started = false;
+
+export async function startBoss(): Promise<void> {
+  if (started) return;
+  await boss.start();
+  await boss.createQueue(EVENTS_QUEUE);
+  started = true;
+  logger.info('pg-boss started');
+}
+
+export async function stopBoss(): Promise<void> {
+  if (!started) return;
+  await boss.stop();
+  started = false;
+}
 
 export async function enqueueGithubEvent(job: GithubEventJob): Promise<void> {
-  await eventsQueue.add(job.name, job, {
-    // Order-preserving-ish: jobs for the same PR share a jobId prefix isn't
-    // enough on its own (BullMQ groups are Pro), so the worker also uses a
-    // keyed mutex. Retries with backoff cover transient Slack/GitHub errors.
-    attempts: 5,
-    backoff: { type: 'exponential', delay: 2000 },
-    removeOnComplete: 1000,
-    removeOnFail: 5000,
+  await boss.send(EVENTS_QUEUE, job, {
+    // Transient Slack/GitHub errors retry with exponential backoff.
+    retryLimit: 5,
+    retryBackoff: true,
+    retryDelay: 2,
+    // Drop jobs that somehow linger far past relevance.
+    expireInSeconds: 3600,
   });
 }

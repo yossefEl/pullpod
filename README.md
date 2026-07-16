@@ -25,7 +25,7 @@ phased roadmap).
 
 Node 22 + TypeScript. A single always-on process runs an Express server that hosts both Slack
 (via Bolt's `ExpressReceiver`) and the GitHub webhook endpoint. Webhooks are verified, deduped,
-and pushed onto a BullMQ/Redis queue; a worker drains them with per-PR ordering and a Slack
+and pushed onto a pg-boss queue (backed by the same Postgres — no Redis); a worker drains them with per-PR ordering and a Slack
 Tier-2 token-bucket throttle. State lives in Postgres (Supabase). Cron jobs handle reminders and
 digests. See [plan.md](plan.md) §2 for the full diagram.
 
@@ -52,7 +52,7 @@ src/
 
 ## Local setup
 
-**Prerequisites:** Node 22+, a Redis instance, a Postgres database (Supabase), and
+**Prerequisites:** Node 22+, a Postgres database (Supabase — also backs the job queue), and
 [ngrok](https://ngrok.com) for a public tunnel.
 
 1. **Install & configure**
@@ -104,7 +104,7 @@ URL that everyone's Slack workspace and the GitHub org webhooks point at — not
 **Google Cloud Run** is the documented target: see [`deploy/cloudrun.md`](deploy/cloudrun.md) for
 the full walkthrough (Dockerfile build, Secret Manager, the `--min-instances=1 --no-cpu-throttling`
 flags that keep the worker + cron running, and wiring the Slack/GitHub apps to the service URL).
-Any always-on host works the same way (Railway/Fly/Render + a Redis addon); `TZ` controls cron
+Any always-on host works the same way (Railway/Fly/Render + a Postgres); `TZ` controls cron
 scheduling (default `Europe/Budapest`).
 
 > The local-setup steps above (with ngrok) are only for a single developer smoke-testing changes.

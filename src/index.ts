@@ -3,6 +3,7 @@ import { logger } from './logger.js';
 import { createSlackApp } from './slack/app.js';
 import { githubWebhookRouter } from './github/webhooks.js';
 import { startWorker } from './jobs/worker.js';
+import { startBoss, stopBoss } from './jobs/queue.js';
 import { startCron } from './jobs/cron.js';
 import { pool } from './db/pool.js';
 
@@ -15,7 +16,9 @@ async function main(): Promise<void> {
   app.get('/healthz', (_req, res) => res.status(200).json({ ok: true }));
   app.use(githubWebhookRouter());
 
-  const worker = startWorker();
+  // Start the queue before accepting webhooks so enqueue always has a live boss.
+  await startBoss();
+  await startWorker();
   startCron();
 
   const server = app.listen(config.PORT, () => {
@@ -25,7 +28,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'shutting down');
     server.close();
-    await worker.close();
+    await stopBoss();
     await pool.end();
     process.exit(0);
   };

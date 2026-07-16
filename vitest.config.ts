@@ -14,7 +14,6 @@ export default defineConfig({
       GITHUB_INSTALLATION_ID: '1',
       GITHUB_ORG: 'voovostudy',
       DATABASE_URL: 'postgres://localhost:5432/test',
-      REDIS_URL: 'redis://localhost:6379',
     },
   },
 });

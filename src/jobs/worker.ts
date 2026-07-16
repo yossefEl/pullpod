@@ -1,5 +1,4 @@
-import { Worker } from 'bullmq';
-import { connection, EVENTS_QUEUE, type GithubEventJob } from './queue.js';
+import { boss, EVENTS_QUEUE, type GithubEventJob } from './queue.js';
 import { logger } from '../logger.js';
 import { handlePrOpened } from '../github/handlers/pr-opened.js';
 import { handlePrClosed } from '../github/handlers/pr-closed.js';
@@ -40,22 +39,21 @@ async function route(job: GithubEventJob): Promise<void> {
   }
 }
 
-export function startWorker(): Worker<GithubEventJob> {
-  const worker = new Worker<GithubEventJob>(
+/**
+ * Start the pg-boss worker. batchSize 1 gives each event independent retry
+ * semantics (a throw retries only that job) and strict FIFO processing —
+ * more than enough at our volume, and per-PR ordering is additionally
+ * guaranteed by the keyed mutex in the Slack channel layer.
+ */
+export async function startWorker(): Promise<void> {
+  await boss.work<GithubEventJob>(
     EVENTS_QUEUE,
-    async (job) => {
+    { batchSize: 1, pollingIntervalSeconds: 1 },
+    async ([job]) => {
+      if (!job) return;
       logger.debug({ name: job.data.name, deliveryId: job.data.deliveryId }, 'processing event');
-      await route(job.data);
+      await route(job.data); // throw => pg-boss retries with backoff
     },
-    { connection, concurrency: 5 },
   );
-
-  worker.on('failed', (job, err) => {
-    logger.error({ name: job?.data.name, attempts: job?.attemptsMade, err: err.message }, 'job failed');
-  });
-  worker.on('completed', (job) => {
-    logger.debug({ name: job.data.name }, 'job completed');
-  });
-
-  return worker;
+  logger.info('worker started');
 }

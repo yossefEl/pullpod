@@ -12,7 +12,6 @@ const schema = z.object({
   GITHUB_ORG: z.string().min(1),
 
   DATABASE_URL: z.string().min(1),
-  REDIS_URL: z.string().default('redis://localhost:6379'),
   PORT: z.coerce.number().int().positive().default(3000),
   TZ: z.string().default('Europe/Budapest'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),

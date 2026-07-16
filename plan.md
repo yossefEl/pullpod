@@ -45,8 +45,8 @@ doesn't need surgery if this ever goes multi-tenant.
                     │            slash commands, App Home        │        modals, App Home)
                     │                  │                         │
                     │                  ▼                         │
-                    │       BullMQ queue (Redis)                 │
-                    │   - per-PR ordering (job groups)           │
+                    │       pg-boss queue (in Postgres)          │
+                    │   - per-PR ordering (keyed mutex)          │
                     │   - retries, idempotency by delivery_id    │
                     │   - throttling for Slack tier-2 calls      │
                     │                  │                         │
@@ -67,17 +67,17 @@ doesn't need surgery if this ever goes multi-tenant.
 | Slack SDK | `@slack/bolt` (ExpressReceiver) | Events, interactivity, App Home, slash commands in one framework |
 | GitHub | GitHub App + `octokit` + `@octokit/webhooks` | Org install, app identity, signature verification built in |
 | HTTP | Express (shared with Bolt's receiver) | One process, one port |
-| Queue | BullMQ + Redis | Webhook ACK-fast/process-later, retries, rate-limit throttling |
-| DB | Postgres (Supabase project) | Already in our toolchain; migrations via Supabase CLI |
+| Queue | pg-boss (Postgres-backed) | Durable ACK-fast/process-later + retries, reusing the DB — no Redis to run |
+| DB | Postgres (Supabase project) | Already in our toolchain; also backs the queue |
 | Scheduler | `node-cron` in-process | Internal scale doesn't need a distributed scheduler |
-| Deploy | Railway (or Fly.io) — one service + Redis addon | Always-on public HTTPS, cheap, zero-ops |
+| Deploy | Cloud Run (min-instances=1) or Railway/Fly — one service | Always-on public HTTPS, managed TLS |
 | Local dev | `ngrok` tunnel + a dev Slack app + a dev GitHub App | Both platforms need public URLs |
 | Lint/format/test | ESLint + Prettier + Vitest | Standard |
 
 ### Why not serverless
 
 Slack requires a 3-second ACK and retries aggressively; GitHub redelivers on timeout. A persistent
-process with an in-memory Bolt receiver + BullMQ is dramatically simpler than wiring cold-start-safe
+process with a Bolt receiver + a pg-boss queue is dramatically simpler than wiring cold-start-safe
 functions, and an internal tool doesn't need scale-to-zero.
 
 ---
@@ -309,7 +309,7 @@ pullpod/
 │   │   ├── channel-naming.ts
 │   │   └── mergeability.ts
 │   ├── jobs/
-│   │   ├── queue.ts             # BullMQ setup, per-PR job groups
+│   │   ├── queue.ts             # pg-boss setup + enqueue
 │   │   └── cron.ts              # reminders, digests, standup, analytics
 │   └── db/                      # typed query layer
 └── test/                        # Vitest: naming, mapping, block builders, handler logic (nock'd)
@@ -326,12 +326,12 @@ pullpod/
 | 1.1 | Repo scaffold: TS, ESLint, Vitest, Express+Bolt boot, `/healthz` | App runs locally |
 | 1.2 | Slack app from manifest (dev + prod), GitHub App created & installed on `voovo-mobile` | Webhooks arrive via ngrok |
 | 1.3 | Supabase migrations (§3) + typed db layer | Migration applies cleanly |
-| 1.4 | GitHub webhook receiver: verify, dedupe, enqueue; BullMQ worker | Redelivered events are no-ops |
+| 1.4 | GitHub webhook receiver: verify, dedupe, enqueue; pg-boss worker | Redelivered events are no-ops |
 | 1.5 | PR opened → channel + invites + PR card + pin/bookmark | New PR produces a working pod |
 | 1.6 | User mapping: email auto-match on boot + `/pullpod link` | Author & reviewers invited correctly |
 | 1.7 | Comments/reviews → Slack (with author impersonation, threads) | GitHub conversation mirrors live |
 | 1.8 | Closed/merged → outcome + archive; reopen → unarchive; archived-guard | Channel lifecycle correct |
-| 1.9 | Deploy to Railway (service + Redis), point prod apps at it | Works without ngrok |
+| 1.9 | Deploy to Cloud Run (min-instances=1), point prod apps at it | Works without ngrok |
 
 ### Phase 2 — Table stakes (target: ~1 week)
 
@@ -376,8 +376,8 @@ pullpod/
 SLACK_BOT_TOKEN=xoxb-…            SLACK_SIGNING_SECRET=…
 GITHUB_APP_ID=…                   GITHUB_APP_PRIVATE_KEY=…  (base64)
 GITHUB_WEBHOOK_SECRET=…           GITHUB_INSTALLATION_ID=…
-DATABASE_URL=…  (Supabase)        REDIS_URL=…
+DATABASE_URL=…  (Supabase, also backs the pg-boss queue)
 SENTRY_DSN=…  (Phase 3)           TZ=Europe/Budapest
 ```
 
-Secrets live in Railway env vars; `.env.example` checked in, `.env` gitignored.
+Secrets live in Cloud Run (Secret Manager); `.env.example` checked in, `.env` gitignored.

@@ -2,7 +2,7 @@
 
 PullPod is a **shared team service**, so it runs as an always-on deployment with a stable
 HTTPS URL — not a laptop tunnel. Cloud Run fits: managed TLS, a stable URL, and (with the two
-flags below) a continuously-running container for the BullMQ worker and cron jobs.
+flags below) a continuously-running container for the pg-boss worker and cron jobs.
 
 ## Why the two non-default flags matter
 
@@ -17,10 +17,8 @@ background work. So we deploy with:
 
 - `gcloud` CLI installed and authed: `gcloud auth login && gcloud config set project <PROJECT_ID>`
 - Enable APIs: `gcloud services enable run.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com`
-- **Postgres**: Supabase (already in `.env`) or Cloud SQL.
-- **Redis**: Cloud Run can't reach Memorystore without a Serverless VPC connector, so the
-  simplest option is a serverless Redis like **Upstash** (TLS URL, works over the public
-  internet). Use Memorystore + a VPC connector only if you want everything in-VPC.
+- **Postgres**: Supabase (already in `.env`) or Cloud SQL. This is the *only* datastore —
+  the job queue (pg-boss) lives in the same database, so **there is no Redis to provision.**
 
 ## 1. Store secrets in Secret Manager
 
@@ -32,7 +30,6 @@ printf '%s' '<slack signing secret>'   | gcloud secrets create SLACK_SIGNING_SEC
 printf '%s' '<base64 pem>'             | gcloud secrets create GITHUB_APP_PRIVATE_KEY --data-file=-
 printf '%s' '<webhook secret>'         | gcloud secrets create GITHUB_WEBHOOK_SECRET  --data-file=-
 printf '%s' '<supabase url>'           | gcloud secrets create DATABASE_URL           --data-file=-
-printf '%s' '<upstash redis url>'      | gcloud secrets create REDIS_URL              --data-file=-
 ```
 
 (To update one later: `printf '%s' 'newval' | gcloud secrets versions add <NAME> --data-file=-`.)
@@ -50,7 +47,7 @@ gcloud run deploy pullpod \
   --no-cpu-throttling \
   --allow-unauthenticated \
   --set-env-vars "GITHUB_APP_ID=<id>,GITHUB_INSTALLATION_ID=<id>,GITHUB_ORG=flufylabs,TZ=Europe/Budapest,LOG_LEVEL=info,NODE_ENV=production" \
-  --set-secrets "SLACK_BOT_TOKEN=SLACK_BOT_TOKEN:latest,SLACK_SIGNING_SECRET=SLACK_SIGNING_SECRET:latest,GITHUB_APP_PRIVATE_KEY=GITHUB_APP_PRIVATE_KEY:latest,GITHUB_WEBHOOK_SECRET=GITHUB_WEBHOOK_SECRET:latest,DATABASE_URL=DATABASE_URL:latest,REDIS_URL=REDIS_URL:latest"
+  --set-secrets "SLACK_BOT_TOKEN=SLACK_BOT_TOKEN:latest,SLACK_SIGNING_SECRET=SLACK_SIGNING_SECRET:latest,GITHUB_APP_PRIVATE_KEY=GITHUB_APP_PRIVATE_KEY:latest,GITHUB_WEBHOOK_SECRET=GITHUB_WEBHOOK_SECRET:latest,DATABASE_URL=DATABASE_URL:latest"
 ```
 
 `--allow-unauthenticated` is required: Slack and GitHub call the endpoints without GCP IAM
