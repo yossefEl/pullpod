@@ -46,7 +46,7 @@ gcloud run deploy pullpod \
   --min-instances=1 \
   --no-cpu-throttling \
   --allow-unauthenticated \
-  --set-env-vars "GITHUB_APP_ID=<id>,GITHUB_INSTALLATION_ID=<id>,GITHUB_ORG=flufylabs,TZ=Europe/Budapest,LOG_LEVEL=info,NODE_ENV=production" \
+  --set-env-vars "GITHUB_APP_ID=<id>,GITHUB_INSTALLATION_ID=<id>,GITHUB_ORG=voovostudy,TZ=Europe/Budapest,LOG_LEVEL=info,NODE_ENV=production" \
   --set-secrets "SLACK_BOT_TOKEN=SLACK_BOT_TOKEN:latest,SLACK_SIGNING_SECRET=SLACK_SIGNING_SECRET:latest,GITHUB_APP_PRIVATE_KEY=GITHUB_APP_PRIVATE_KEY:latest,GITHUB_WEBHOOK_SECRET=GITHUB_WEBHOOK_SECRET:latest,DATABASE_URL=DATABASE_URL:latest"
 ```
 

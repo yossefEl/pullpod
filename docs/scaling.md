@@ -61,7 +61,7 @@ isolation on queries.
 GitHub Marketplace listing, per-tenant encrypted token storage, billing.
 
 **Revisit when:** you want PullPod to serve a second Slack workspace or a second GitHub org
-(e.g. flufylabs **and** voovostudy at once), or to offer it outside the team.
+(e.g. voovostudy **and** a second org at once), or to offer it outside the team.
 
 **Migration path — the schema was built for this:**
 - `installations` already exists as the tenant boundary; add its id as a FK on `pr_channels`,
