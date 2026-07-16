@@ -98,5 +98,14 @@ src/
 
 ## Deployment
 
-Deploy the single service + a Redis addon to Railway/Fly/Render, set the env vars, and point the
-Slack and GitHub apps at the public URL. `TZ` controls cron scheduling (default `Europe/Budapest`).
+PullPod is a **shared team service**, so it runs as an always-on deployment with a stable HTTPS
+URL that everyone's Slack workspace and the GitHub org webhooks point at — not a laptop tunnel.
+
+**Google Cloud Run** is the documented target: see [`deploy/cloudrun.md`](deploy/cloudrun.md) for
+the full walkthrough (Dockerfile build, Secret Manager, the `--min-instances=1 --no-cpu-throttling`
+flags that keep the worker + cron running, and wiring the Slack/GitHub apps to the service URL).
+Any always-on host works the same way (Railway/Fly/Render + a Redis addon); `TZ` controls cron
+scheduling (default `Europe/Budapest`).
+
+> The local-setup steps above (with ngrok) are only for a single developer smoke-testing changes.
+> Because a tunnel dies when that laptop sleeps, it's never how the team runs the app.
