@@ -25,7 +25,7 @@ create table if not exists user_prefs (
   paused            boolean not null default false,
   timeslot_start    time,
   timeslot_end      time,
-  timezone          text not null default 'Europe/Budapest',
+  timezone          text not null default 'UTC',
   notify_ci         boolean not null default true,
   updated_at        timestamptz not null default now()
 );

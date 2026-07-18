@@ -15,7 +15,7 @@ describe('slugify', () => {
 
 describe('repoShort', () => {
   it('returns the part after the org', () => {
-    expect(repoShort('voovostudy/voovo-mobile')).toBe('voovo-mobile');
+    expect(repoShort('example-org/web')).toBe('web');
   });
   it('handles names without a slash', () => {
     expect(repoShort('solo')).toBe('solo');
@@ -24,13 +24,13 @@ describe('repoShort', () => {
 
 describe('buildChannelName', () => {
   it('builds prefix_repo_number_title', () => {
-    const name = buildChannelName('_pr', 'voovostudy/voovo-mobile', 660, 'fix offering url');
-    expect(name).toBe('_pr_voovo-mobile_660_fix-offering-url');
+    const name = buildChannelName('_pr', 'example-org/web', 660, 'fix offering url');
+    expect(name).toBe('_pr_web_660_fix-offering-url');
   });
 
   it('never exceeds Slack’s 80-char limit', () => {
     const long = 'a'.repeat(300);
-    const name = buildChannelName('_pr', 'voovostudy/voovo-content-platform', 12345, long);
+    const name = buildChannelName('_pr', 'example-org/content-platform', 12345, long);
     expect(name.length).toBeLessThanOrEqual(80);
   });
 

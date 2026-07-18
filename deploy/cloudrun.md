@@ -17,7 +17,7 @@ background work. So we deploy with:
 
 - `gcloud` CLI installed and authed: `gcloud auth login && gcloud config set project <PROJECT_ID>`
 - Enable APIs: `gcloud services enable run.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com`
-- **Postgres**: Supabase (already in `.env`) or Cloud SQL. This is the *only* datastore —
+- **Postgres**: any managed Postgres (e.g. Supabase or Cloud SQL). This is the *only* datastore —
   the job queue (pg-boss) lives in the same database, so **there is no Redis to provision.**
 
 ## 1. Store secrets in Secret Manager
@@ -29,7 +29,7 @@ printf '%s' 'xoxb-...'                 | gcloud secrets create SLACK_BOT_TOKEN  
 printf '%s' '<slack signing secret>'   | gcloud secrets create SLACK_SIGNING_SECRET   --data-file=-
 printf '%s' '<base64 pem>'             | gcloud secrets create GITHUB_APP_PRIVATE_KEY --data-file=-
 printf '%s' '<webhook secret>'         | gcloud secrets create GITHUB_WEBHOOK_SECRET  --data-file=-
-printf '%s' '<supabase url>'           | gcloud secrets create DATABASE_URL           --data-file=-
+printf '%s' '<postgres url>'           | gcloud secrets create DATABASE_URL           --data-file=-
 ```
 
 (To update one later: `printf '%s' 'newval' | gcloud secrets versions add <NAME> --data-file=-`.)
@@ -46,9 +46,13 @@ gcloud run deploy pullpod \
   --min-instances=1 \
   --no-cpu-throttling \
   --allow-unauthenticated \
-  --set-env-vars "GITHUB_APP_ID=<id>,GITHUB_INSTALLATION_ID=<id>,GITHUB_ORG=voovostudy,TZ=Europe/Budapest,LOG_LEVEL=info,NODE_ENV=production" \
+  --set-env-vars "GITHUB_APP_ID=<id>,GITHUB_INSTALLATION_ID=<id>,GITHUB_ORG=<your-org>,TZ=<your-tz>,LOG_LEVEL=info,NODE_ENV=production" \
   --set-secrets "SLACK_BOT_TOKEN=SLACK_BOT_TOKEN:latest,SLACK_SIGNING_SECRET=SLACK_SIGNING_SECRET:latest,GITHUB_APP_PRIVATE_KEY=GITHUB_APP_PRIVATE_KEY:latest,GITHUB_WEBHOOK_SECRET=GITHUB_WEBHOOK_SECRET:latest,DATABASE_URL=DATABASE_URL:latest"
 ```
+
+To enable verified per-user identity (`/pullpod connect`), also pass the OAuth values —
+`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `TOKEN_ENC_KEY`, `PUBLIC_URL` — and, if you use a
+per-repo merge allowlist, `MERGE_RESTRICTIONS` (JSON). Keep the secret ones in Secret Manager.
 
 `--allow-unauthenticated` is required: Slack and GitHub call the endpoints without GCP IAM
 credentials. The endpoints are secured by Slack's signing-secret check and GitHub's
@@ -63,7 +67,7 @@ The runtime image doesn't carry the migration tooling, so apply migrations from 
 against the production database (one-off, and after any schema change):
 
 ```bash
-DATABASE_URL='<supabase url>' npm run db:migrate
+DATABASE_URL='<postgres url>' npm run db:migrate
 ```
 
 ## 4. Point the apps at the Service URL
@@ -81,7 +85,8 @@ curl https://<service-url>/healthz          # -> {"ok":true}
 gcloud run services logs read pullpod --region europe-west1 --limit 50
 ```
 
-Then open a test PR in a watched repo and confirm the pod channel appears.
+Then open a test PR into a review-required branch of a watched repo and confirm its card
+appears in the shared channel.
 
 ## Updating later
 

@@ -12,7 +12,7 @@ export default defineConfig({
       GITHUB_APP_PRIVATE_KEY: 'dGVzdA==',
       GITHUB_WEBHOOK_SECRET: 'whsec',
       GITHUB_INSTALLATION_ID: '1',
-      GITHUB_ORG: 'voovostudy',
+      GITHUB_ORG: 'example-org',
       DATABASE_URL: 'postgres://localhost:5432/test',
     },
   },

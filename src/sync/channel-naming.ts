@@ -11,7 +11,7 @@ export function slugify(input: string): string {
     .replace(/^[-_]+|[-_]+$/g, '');
 }
 
-/** Repo short name = the part after the org, e.g. voovostudy/voovo-mobile -> voovo-mobile. */
+/** Repo short name = the part after the org, e.g. example-org/web -> web. */
 export function repoShort(repoFullName: string): string {
   const parts = repoFullName.split('/');
   return parts[parts.length - 1] ?? repoFullName;
@@ -19,7 +19,7 @@ export function repoShort(repoFullName: string): string {
 
 /**
  * Build the base channel name: `<prefix>_<repo-short>_<pr#>_<title-slug>` truncated to 80.
- * e.g. _pr_voovo-mobile_660_fix_offering_use_canonical_url
+ * e.g. _pr_web_660_fix_offering_use_canonical_url
  */
 export function buildChannelName(
   prefix: string,

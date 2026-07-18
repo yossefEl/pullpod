@@ -1,5 +1,6 @@
 import { query } from './pool.js';
 import type {
+  GithubIdentity,
   GithubKind,
   MessageLink,
   PrChannel,
@@ -40,7 +41,7 @@ export async function getUserLinkBySlack(slackUserId: string): Promise<UserLink 
 export async function upsertUserLink(
   githubLogin: string,
   slackUserId: string,
-  matchedBy: 'email' | 'manual',
+  matchedBy: 'email' | 'manual' | 'oauth',
 ): Promise<UserLink> {
   const res = await query<UserLink>(
     `insert into user_links (github_login, slack_user_id, matched_by)
@@ -53,6 +54,30 @@ export async function upsertUserLink(
   return res.rows[0]!;
 }
 
+/**
+ * Link a Slack user to a GitHub login from the `/pullpod link` command, safely:
+ * - refuses to hijack a GitHub login already claimed by a *different* Slack user;
+ * - lets a Slack user re-link (replacing their own previous GitHub login).
+ * (This is a trust-level guard for an internal tool — verified linking would use GitHub OAuth.)
+ */
+export async function claimUserLink(
+  githubLogin: string,
+  slackUserId: string,
+): Promise<{ status: 'linked' | 'relinked' | 'github_taken'; ownerSlackId?: string }> {
+  const byGithub = await getUserLinkByGithub(githubLogin);
+  if (byGithub && byGithub.slack_user_id !== slackUserId) {
+    return { status: 'github_taken', ownerSlackId: byGithub.slack_user_id };
+  }
+  const bySlack = await getUserLinkBySlack(slackUserId);
+  const relink = !!bySlack && bySlack.github_login !== githubLogin;
+  if (relink) {
+    // Release the Slack user's previous GitHub login so the unique constraint allows the new one.
+    await query(`delete from user_links where slack_user_id = $1`, [slackUserId]);
+  }
+  await upsertUserLink(githubLogin, slackUserId, 'manual');
+  return { status: relink ? 'relinked' : 'linked' };
+}
+
 export async function githubLoginsForSlackUsers(
   slackUserIds: string[],
 ): Promise<Map<string, string>> {
@@ -62,6 +87,61 @@ export async function githubLoginsForSlackUsers(
     [slackUserIds],
   );
   return new Map(res.rows.map((r) => [r.slack_user_id, r.github_login]));
+}
+
+/**
+ * Establish a *verified* link (from OAuth). Clears any prior rows for this Slack
+ * user or GitHub login first, so the proven identity always wins the unique
+ * constraints — no manual-claim leftovers can shadow it.
+ */
+export async function setVerifiedLink(githubLogin: string, slackUserId: string): Promise<void> {
+  await query(`delete from user_links where slack_user_id = $1 or github_login = $2`, [
+    slackUserId,
+    githubLogin,
+  ]);
+  await upsertUserLink(githubLogin, slackUserId, 'oauth');
+}
+
+// --- github_identities (verified OAuth tokens) ---
+
+export async function getGithubIdentityBySlack(
+  slackUserId: string,
+): Promise<GithubIdentity | null> {
+  const res = await query<GithubIdentity>(
+    `select * from github_identities where slack_user_id = $1`,
+    [slackUserId],
+  );
+  return res.rows[0] ?? null;
+}
+
+export async function upsertGithubIdentity(row: {
+  slack_user_id: string;
+  github_login: string;
+  github_user_id: number;
+  access_token_enc: string;
+  refresh_token_enc: string | null;
+  expires_at: string | null;
+}): Promise<void> {
+  await query(
+    `insert into github_identities
+       (slack_user_id, github_login, github_user_id, access_token_enc, refresh_token_enc, expires_at)
+     values ($1,$2,$3,$4,$5,$6)
+     on conflict (slack_user_id) do update set
+       github_login = excluded.github_login,
+       github_user_id = excluded.github_user_id,
+       access_token_enc = excluded.access_token_enc,
+       refresh_token_enc = excluded.refresh_token_enc,
+       expires_at = excluded.expires_at,
+       updated_at = now()`,
+    [
+      row.slack_user_id,
+      row.github_login,
+      row.github_user_id,
+      row.access_token_enc,
+      row.refresh_token_enc,
+      row.expires_at,
+    ],
+  );
 }
 
 // --- user_prefs ---
@@ -157,6 +237,51 @@ export async function getPrChannelByChannelId(channelId: string): Promise<PrChan
   return res.rows[0] ?? null;
 }
 
+/** Find the PR whose root (thread-parent) message is `rootTs` — used by two-way sync. */
+export async function getPrChannelByRootTs(rootTs: string): Promise<PrChannel | null> {
+  const res = await query<PrChannel>(`select * from pr_channels where root_ts = $1`, [rootTs]);
+  return res.rows[0] ?? null;
+}
+
+/**
+ * Idempotently reserve the row for a PR BEFORE posting its root message. Returns
+ * the new row, or null if one already exists (another delivery/retry won it) — the
+ * caller then skips posting, so a shared-channel insert conflict can never cause a
+ * double-post again. root_ts is filled in after the message is posted.
+ */
+export async function reservePrChannel(row: {
+  repo_full_name: string;
+  pr_number: number;
+  channel_id: string;
+  channel_name: string;
+  pr_title: string;
+  pr_author_login: string;
+  pr_url: string;
+  is_draft: boolean;
+  opened_at: string;
+}): Promise<PrChannel | null> {
+  const res = await query<PrChannel>(
+    `insert into pr_channels
+       (repo_full_name, pr_number, channel_id, channel_name, root_ts, state,
+        pr_title, pr_author_login, pr_url, is_draft, opened_at)
+     values ($1,$2,$3,$4,null,'open',$5,$6,$7,$8,$9)
+     on conflict (repo_full_name, pr_number) do nothing
+     returning *`,
+    [
+      row.repo_full_name,
+      row.pr_number,
+      row.channel_id,
+      row.channel_name,
+      row.pr_title,
+      row.pr_author_login,
+      row.pr_url,
+      row.is_draft,
+      row.opened_at,
+    ],
+  );
+  return res.rows[0] ?? null;
+}
+
 export async function insertPrChannel(
   row: Omit<PrChannel, 'id' | 'first_review_at' | 'closed_at' | 'merged' | 'state'> & {
     state?: PrChannel['state'];
@@ -164,15 +289,16 @@ export async function insertPrChannel(
 ): Promise<PrChannel> {
   const res = await query<PrChannel>(
     `insert into pr_channels
-       (repo_full_name, pr_number, channel_id, channel_name, state, pr_title,
+       (repo_full_name, pr_number, channel_id, channel_name, root_ts, state, pr_title,
         pr_author_login, pr_url, is_draft, opened_at)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      returning *`,
     [
       row.repo_full_name,
       row.pr_number,
       row.channel_id,
       row.channel_name,
+      row.root_ts,
       row.state ?? 'open',
       row.pr_title,
       row.pr_author_login,
@@ -206,6 +332,14 @@ export async function setFirstReviewIfUnset(id: number, at: string): Promise<voi
 
 export async function listOpenPrChannels(): Promise<PrChannel[]> {
   const res = await query<PrChannel>(`select * from pr_channels where state = 'open'`);
+  return res.rows;
+}
+
+/** Every PR that has a posted root message — used to backfill card re-renders. */
+export async function listPrChannelsWithRoot(): Promise<PrChannel[]> {
+  const res = await query<PrChannel>(
+    `select * from pr_channels where root_ts is not null order by id`,
+  );
   return res.rows;
 }
 

@@ -2,7 +2,7 @@ import { logger } from '../../logger.js';
 import { getPrChannel } from '../../db/repo.js';
 import { github, splitRepo } from '../client.js';
 import { fetchMergeState } from '../../sync/mergeability.js';
-import { postIfOpen } from '../../slack/channels.js';
+import { postToPr } from '../../slack/channels.js';
 import { conflictBlocks } from '../../slack/blocks/events.js';
 
 // Remember the last conflict state we announced per PR so we don't re-post on
@@ -44,7 +44,7 @@ export async function handlePush(payload: any): Promise<void> {
     if (mergeState === 'conflicts') {
       if (!announcedConflict.has(key)) {
         announcedConflict.add(key);
-        await postIfOpen(pr.id, conflictBlocks(), 'This branch has merge conflicts');
+        await postToPr(pr.id, conflictBlocks(), 'This branch has merge conflicts');
       }
     } else if (mergeState === 'mergeable') {
       announcedConflict.delete(key);

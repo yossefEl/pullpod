@@ -1,7 +1,6 @@
 import { logger } from '../../logger.js';
 import { getPrChannel, getRepoConfig } from '../../db/repo.js';
-import { addReaction, postIfOpen } from '../../slack/channels.js';
-import { slack } from '../../slack/client.js';
+import { addReaction, postToPr } from '../../slack/channels.js';
 import { ciBlocks } from '../../slack/blocks/events.js';
 import type { PrChannel } from '../../db/types.js';
 
@@ -36,7 +35,7 @@ export async function handleCheck(payload: any): Promise<void> {
     }
 
     const url = payload.check_run?.html_url ?? suite.html_url ?? null;
-    await postIfOpen(pr.id, ciBlocks(conclusion, name, url), `CI ${name}: ${conclusion}`);
+    await postToPr(pr.id, ciBlocks(conclusion, name, url), `CI ${name}: ${conclusion}`);
   }
 }
 
@@ -61,20 +60,14 @@ export async function handleStatus(payload: any): Promise<void> {
       await reactOnCard(pr, state === 'success' ? 'white_check_mark' : 'warning');
       continue;
     }
-    await postIfOpen(pr.id, ciBlocks(state, payload.context ?? 'status', payload.target_url ?? null),
+    await postToPr(pr.id, ciBlocks(state, payload.context ?? 'status', payload.target_url ?? null),
       `Status ${payload.context}: ${state}`);
   }
 }
 
 async function reactOnCard(pr: PrChannel, emoji: string): Promise<void> {
-  // The pinned card is the first message; react to the pin if present.
-  try {
-    const pins = await slack.pins.list({ channel: pr.channel_id });
-    const first = (pins.items as any[])?.find((i) => i.message)?.message;
-    if (first?.ts) await addReaction(pr.channel_id, first.ts, emoji);
-  } catch (err) {
-    logger.debug({ err }, 'react on card failed');
-  }
+  // React on the PR's root message (the thread parent).
+  if (pr.root_ts) await addReaction(pr.channel_id, pr.root_ts, emoji);
 }
 
 async function prNumbersForHead(payload: any, repoFullName: string): Promise<number[]> {

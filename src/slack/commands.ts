@@ -1,22 +1,26 @@
 import type bolt from '@slack/bolt';
+import { oauthConfigured } from '../config.js';
+import { authorizeUrl } from '../github/oauth.js';
+import { refreshRootCard } from '../github/handlers/card.js';
 import {
-  getUserLinkBySlack,
+  getGithubIdentityBySlack,
   getUserPrefs,
+  listPrChannelsWithRoot,
   listRepoConfigs,
   updateUserPrefs,
   upsertRepoConfig,
-  upsertUserLink,
 } from '../db/repo.js';
 
 const HELP = [
   '*PullPod commands*',
-  '`/pullpod link <github-username>` — connect your GitHub account',
-  '`/pullpod pause` / `resume` — stop/start being added to PR channels',
+  '`/pullpod connect` — connect your GitHub account (secure OAuth)',
+  '`/pullpod pause` / `resume` — stop/start being added to PR threads',
   '`/pullpod timeslot 09:00 18:00 [tz]` — set your review notification window',
   '`/pullpod status` — show your current settings',
   '`/pullpod repos` — list repos PullPod is watching (admin)',
   '`/pullpod repo <owner/name> on|off` — enable/disable a repo (admin)',
   '`/pullpod repo <owner/name> team <#channel-id>` — set a repo team channel (admin)',
+  '`/pullpod refresh-cards` — re-render all PR cards with the latest design (admin)',
   '`/pullpod help` — this message',
 ].join('\n');
 
@@ -31,11 +35,37 @@ export function registerCommands(app: bolt.App): void {
       case 'help':
         return respond({ text: HELP });
 
+      case 'connect':
       case 'link': {
-        const username = rest[0]?.replace(/^@/, '');
-        if (!username) return respond({ text: 'Usage: `/pullpod link <github-username>`' });
-        await upsertUserLink(username, userId, 'manual');
-        return respond({ text: `✅ Linked you to GitHub as \`${username}\`.` });
+        if (!oauthConfigured()) {
+          return respond({
+            text: '⚠️ GitHub connecting isn’t configured on the server yet. Ask an admin to set up GitHub OAuth.',
+          });
+        }
+        return respond({
+          text: 'Connect your GitHub account:',
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: '🔗 *Connect your GitHub account*\nYou’ll authorize PullPod on GitHub. After that, your approvals and comments are submitted as *you* — and PullPod can only do what your GitHub permissions allow.',
+              },
+            },
+            {
+              type: 'actions',
+              elements: [
+                {
+                  type: 'button',
+                  style: 'primary',
+                  text: { type: 'plain_text', text: 'Connect GitHub' },
+                  url: authorizeUrl(userId),
+                  action_id: 'connect_github',
+                },
+              ],
+            },
+          ],
+        });
       }
 
       case 'pause':
@@ -49,7 +79,7 @@ export function registerCommands(app: bolt.App): void {
       case 'timeslot': {
         const [start, end, tz] = rest;
         if (!start || !end || !/^\d{2}:\d{2}$/.test(start) || !/^\d{2}:\d{2}$/.test(end)) {
-          return respond({ text: 'Usage: `/pullpod timeslot 09:00 18:00 [Europe/Budapest]`' });
+          return respond({ text: 'Usage: `/pullpod timeslot 09:00 18:00 [Area/City]`' });
         }
         await updateUserPrefs(userId, {
           timeslot_start: start,
@@ -60,7 +90,7 @@ export function registerCommands(app: bolt.App): void {
       }
 
       case 'status': {
-        const link = await getUserLinkBySlack(userId);
+        const identity = await getGithubIdentityBySlack(userId);
         const prefs = await getUserPrefs(userId);
         const slot =
           prefs.timeslot_start && prefs.timeslot_end
@@ -68,12 +98,28 @@ export function registerCommands(app: bolt.App): void {
             : 'anytime';
         return respond({
           text: [
-            `*GitHub:* ${link ? `\`${link.github_login}\`` : '_not linked_'}`,
+            `*GitHub:* ${identity ? `\`${identity.github_login}\` ✅ connected` : '_not connected — run `/pullpod connect`_'}`,
             `*Status:* ${prefs.paused ? 'paused' : 'active'}`,
             `*Time slot:* ${slot}`,
             `*CI notifications:* ${prefs.notify_ci ? 'on' : 'off'}`,
           ].join('\n'),
         });
+      }
+
+      case 'refresh-cards':
+      case 'refresh': {
+        const cards = await listPrChannelsWithRoot();
+        await respond({ text: `♻️ Re-rendering ${cards.length} PR card${cards.length === 1 ? '' : 's'}…` });
+        let ok = 0;
+        for (const pr of cards) {
+          try {
+            await refreshRootCard(pr);
+            ok++;
+          } catch {
+            /* refreshRootCard logs its own failures */
+          }
+        }
+        return respond({ text: `✅ Refreshed ${ok}/${cards.length} PR card${cards.length === 1 ? '' : 's'}.` });
       }
 
       case 'repos': {

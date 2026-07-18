@@ -2,14 +2,24 @@ import type bolt from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 import { logger } from '../logger.js';
 import { github, splitRepo } from '../github/client.js';
-import { getUserLinkBySlack, getUserPrefs, updateUserPrefs, upsertUserLink } from '../db/repo.js';
+import { authorizeUrl, userOctokit } from '../github/oauth.js';
+import { mergeRestrictions, oauthConfigured } from '../config.js';
+import { getGithubIdentityBySlack, getUserPrefs, updateUserPrefs } from '../db/repo.js';
 import { publishHome } from './home.js';
 
 type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
+/**
+ * Repo-specific merge policy (by short repo name), configured via the
+ * MERGE_RESTRICTIONS env var. An entry restricts merging to the listed GitHub
+ * logins. Every repo also requires at least one approval (below).
+ */
+const MERGE_RESTRICTIONS: Record<string, string[]> = mergeRestrictions();
+
 export function registerInteractivity(app: bolt.App): void {
-  // Link buttons are pure URLs; ack to silence the "action failed" toast.
+  // URL buttons (Open PR, Connect GitHub) still fire an action; ack to silence the toast.
   app.action(/^open_pr/, async ({ ack }) => ack());
+  app.action('connect_github', async ({ ack }) => ack());
 
   // --- PR review actions from the pinned card ---
   app.action('approve_pr', async ({ ack, body, client }) => {
@@ -30,11 +40,13 @@ export function registerInteractivity(app: bolt.App): void {
     const slackUserId = body.user.id;
     const bodyText = view.state.values.body?.body_input?.value ?? '';
 
-    const link = await getUserLinkBySlack(slackUserId);
-    if (!link) {
+    // Reviews are submitted with the user's OWN GitHub token, so GitHub enforces
+    // that they actually have access — and the review is attributed to them.
+    const okit = await userOctokit(slackUserId);
+    if (!okit) {
       await ack({
         response_action: 'errors',
-        errors: { body: 'Link your GitHub account first with /pullpod link <username>.' },
+        errors: { body: 'Connect your GitHub account first — run `/pullpod connect` in Slack.' },
       });
       return;
     }
@@ -42,25 +54,99 @@ export function registerInteractivity(app: bolt.App): void {
 
     try {
       const { owner, repo } = splitRepo(meta.repo);
-      const attributed = `${bodyText}\n\n_— submitted by @${link.github_login} via PullPod_`.trim();
-      await github().rest.pulls.createReview({
+      await okit.rest.pulls.createReview({
         owner,
         repo,
         pull_number: meta.number,
         event: meta.event,
-        body: meta.event === 'APPROVE' && !bodyText ? undefined : attributed,
+        body: meta.event === 'APPROVE' && !bodyText ? undefined : bodyText || undefined,
       });
-      await client.chat.postEphemeral({
-        channel: (body as any).channel?.id ?? slackUserId,
-        user: slackUserId,
-        text: `Done — your *${meta.event.toLowerCase().replace('_', ' ')}* was submitted on ${meta.repo}#${meta.number}.`,
-      });
-    } catch (err: any) {
-      logger.error({ err: err?.message, meta }, 'createReview failed');
       await client.chat.postMessage({
         channel: slackUserId,
-        text: `⚠️ Couldn't submit your review on ${meta.repo}#${meta.number}: ${err?.message ?? 'unknown error'}`,
+        text: `✅ Your *${meta.event.toLowerCase().replace('_', ' ')}* was submitted on ${meta.repo}#${meta.number} as yourself.`,
       });
+    } catch (err: any) {
+      const denied = err?.status === 403 || err?.status === 404;
+      const msg = denied
+        ? `GitHub says you don't have permission to review \`${meta.repo}\`#${meta.number}. You can only review repos you have access to.`
+        : err?.message ?? 'unknown error';
+      logger.error({ err: err?.message, status: err?.status, meta }, 'createReview failed');
+      await client.chat.postMessage({
+        channel: slackUserId,
+        text: `⚠️ Couldn't submit your review on ${meta.repo}#${meta.number}: ${msg}`,
+      });
+    }
+  });
+
+  // --- Merge from the card ---
+  app.action('merge_pr', async ({ ack, body, client }) => {
+    await ack();
+    const value: string = (body as any).actions?.[0]?.value ?? '';
+    const [repoFullName, numStr] = value.split('#');
+    const number = Number(numStr);
+    const slackUserId = body.user.id;
+    const dm = (text: string) => client.chat.postMessage({ channel: slackUserId, text });
+    if (!repoFullName || !Number.isFinite(number)) return;
+
+    // Must be connected — the merge is performed as the real user.
+    const okit = await userOctokit(slackUserId);
+    if (!okit) {
+      await dm('Connect your GitHub account first — run `/pullpod connect` in Slack.');
+      return;
+    }
+
+    // Repo-specific merge restriction from MERGE_RESTRICTIONS (e.g. {"web":["alice"]}).
+    const shortRepo = repoFullName.split('/')[1] ?? repoFullName;
+    const allowed = MERGE_RESTRICTIONS[shortRepo];
+    const identity = await getGithubIdentityBySlack(slackUserId);
+    if (allowed && !allowed.some((l: string) => l.toLowerCase() === (identity?.github_login ?? '').toLowerCase())) {
+      await dm(`Only ${allowed.map((l: string) => `\`${l}\``).join(', ')} can merge PRs in \`${shortRepo}\`.`);
+      return;
+    }
+
+    const { owner, repo } = splitRepo(repoFullName);
+
+    // Require at least one approval and no outstanding "changes requested".
+    try {
+      const { data: reviews } = await github().rest.pulls.listReviews({
+        owner,
+        repo,
+        pull_number: number,
+        per_page: 100,
+      });
+      const latest = new Map<string, string>();
+      for (const r of reviews) {
+        const lg = r.user?.login;
+        if (!lg) continue;
+        const st = String(r.state ?? '').toLowerCase();
+        if (st === 'dismissed') latest.delete(lg);
+        else if (st === 'approved' || st === 'changes_requested' || st === 'commented') latest.set(lg, st);
+      }
+      const states = [...latest.values()];
+      if (states.filter((s) => s === 'approved').length < 1) {
+        await dm(`\`${repoFullName}\`#${number} needs at least one approval before it can be merged.`);
+        return;
+      }
+      if (states.some((s) => s === 'changes_requested')) {
+        await dm(`\`${repoFullName}\`#${number} has requested changes outstanding — resolve them first.`);
+        return;
+      }
+    } catch (err: any) {
+      logger.error({ err: err?.message, repoFullName, number }, 'merge: review check failed');
+      await dm(`Couldn't check reviews for ${repoFullName}#${number}. Try again.`);
+      return;
+    }
+
+    try {
+      await okit.rest.pulls.merge({ owner, repo, pull_number: number });
+      await dm(`🔀 Merged \`${repoFullName}\`#${number}.`);
+    } catch (err: any) {
+      const denied = err?.status === 403 || err?.status === 404 || err?.status === 405;
+      const msg = denied
+        ? `GitHub blocked the merge (your permissions or branch protection): ${err?.message ?? ''}`
+        : err?.message ?? 'unknown error';
+      logger.error({ err: err?.message, status: err?.status, repoFullName, number }, 'merge failed');
+      await dm(`⚠️ Couldn't merge ${repoFullName}#${number}: ${msg}`);
     }
   });
 
@@ -86,18 +172,36 @@ export function registerInteractivity(app: bolt.App): void {
 
   app.action('home_relink', async ({ ack, body, client }) => {
     await ack();
-    await openLinkModal(client, (body as any).trigger_id);
-  });
-
-  app.view('link_modal', async ({ ack, body, view, client }) => {
-    const username = view.state.values.gh?.gh_input?.value?.trim();
-    if (!username) {
-      await ack({ response_action: 'errors', errors: { gh: 'Enter your GitHub username.' } });
+    const slackUserId = body.user.id;
+    if (!oauthConfigured()) {
+      await client.chat.postMessage({
+        channel: slackUserId,
+        text: '⚠️ GitHub linking isn’t configured yet. Ask an admin to set up GitHub OAuth.',
+      });
       return;
     }
-    await ack();
-    await upsertUserLink(username, body.user.id, 'manual');
-    await publishHome(client, body.user.id);
+    await client.chat.postMessage({
+      channel: slackUserId,
+      text: 'Connect your GitHub account:',
+      blocks: [
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: '🔗 *Connect your GitHub account* so your approvals and comments post as you.' },
+        },
+        {
+          type: 'actions',
+          elements: [
+            {
+              type: 'button',
+              style: 'primary',
+              text: { type: 'plain_text', text: 'Connect GitHub' },
+              url: authorizeUrl(slackUserId),
+              action_id: 'connect_github',
+            },
+          ],
+        },
+      ],
+    });
   });
 
   app.action('home_edit_timeslot', async ({ ack, body, client }) => {
@@ -108,7 +212,7 @@ export function registerInteractivity(app: bolt.App): void {
   app.view('timeslot_modal', async ({ ack, body, view, client }) => {
     const start = view.state.values.start?.start_input?.selected_time ?? null;
     const end = view.state.values.end?.end_input?.selected_time ?? null;
-    const tz = view.state.values.tz?.tz_input?.value?.trim() || 'Europe/Budapest';
+    const tz = view.state.values.tz?.tz_input?.value?.trim() || 'UTC';
     await ack();
     await updateUserPrefs(body.user.id, {
       timeslot_start: start,
@@ -149,26 +253,6 @@ async function openReviewModal(
           optional: event === 'APPROVE',
           label: { type: 'plain_text', text: event === 'APPROVE' ? 'Comment (optional)' : 'Comment' },
           element: { type: 'plain_text_input', action_id: 'body_input', multiline: true },
-        },
-      ],
-    },
-  });
-}
-
-async function openLinkModal(client: WebClient, triggerId: string): Promise<void> {
-  await client.views.open({
-    trigger_id: triggerId,
-    view: {
-      type: 'modal',
-      callback_id: 'link_modal',
-      title: { type: 'plain_text', text: 'Link GitHub' },
-      submit: { type: 'plain_text', text: 'Save' },
-      blocks: [
-        {
-          type: 'input',
-          block_id: 'gh',
-          label: { type: 'plain_text', text: 'Your GitHub username' },
-          element: { type: 'plain_text_input', action_id: 'gh_input', placeholder: { type: 'plain_text', text: 'e.g. yossefEl' } },
         },
       ],
     },
