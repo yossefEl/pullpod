@@ -2,6 +2,7 @@ import { config } from './config.js';
 import { logger } from './logger.js';
 import { createSlackApp } from './slack/app.js';
 import { githubWebhookRouter } from './github/webhooks.js';
+import { oauthRouter } from './github/oauth-routes.js';
 import { startWorker } from './jobs/worker.js';
 import { startBoss, stopBoss } from './jobs/queue.js';
 import { startCron } from './jobs/cron.js';
@@ -15,6 +16,7 @@ async function main(): Promise<void> {
   const app = receiver.app;
   app.get('/healthz', (_req, res) => res.status(200).json({ ok: true }));
   app.use(githubWebhookRouter());
+  app.use(oauthRouter());
 
   // Start the queue before accepting webhooks so enqueue always has a live boss.
   await startBoss();

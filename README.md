@@ -1,89 +1,117 @@
 # PullPod 🫛
 
-**A pod for every pull request.** Internal Slack ↔ GitHub app for the Voovo team, inspired by
-[Axolo](https://axolo.co): every PR gets its own ephemeral Slack channel that syncs comments,
-reviews, and CI status — then archives itself on merge.
+**A pod for every pull request.** A self-hosted Slack ↔ GitHub app that brings pull-request
+collaboration into one shared Slack channel: every PR becomes a threaded card that syncs
+comments, reviews, and CI both ways — and lets reviewers approve, comment, and merge without
+leaving Slack.
 
-📋 See [plan.md](plan.md) for the full technical plan (architecture, data model, event flows,
-phased roadmap), and [docs/scaling.md](docs/scaling.md) for the architecture decisions,
-the deliberately-deferred alternatives (Redis/BullMQ, multi-tenancy, HA), and how to scale up.
+📋 See [plan.md](plan.md) for the original technical design and [docs/scaling.md](docs/scaling.md)
+for the architecture decisions and how to scale up. This README is the source of truth for how
+the app works today.
 
 ## What it does
 
-- **1 PR = 1 channel** — opens a `_pr_<repo>_<num>_<title>` channel, invites the author +
-  reviewers (mapped GitHub → Slack by email), posts a pinned card, and archives on merge/close.
-- **GitHub → Slack sync** — PR comments, inline review comments (with code hunks + threading),
-  review verdicts (✅/🔴/💬), CI results (failures-only by default), and merge-conflict alerts,
-  each posted as the GitHub author via `chat:write.customize`.
-- **Slack → GitHub actions** — Approve / Request changes / Comment straight from the pinned card.
-- **Two-way comment sync** — top-level messages in a pod mirror back to the PR (with echo guard).
-- **App Home** — your open PRs + PRs awaiting your review, plus pause, review time slots, and
-  GitHub account linking.
-- **Reminders & digests** — daily stale-PR nudges (only when a review is actually pending on you),
-  per-repo team digest, standup recap, and a weekly cycle-time analytics post.
+- **One shared channel, one thread per PR** — each PR posts a single root **card** into a shared
+  channel (default `#pr-approve`); every comment, review, CI result, and reviewer request threads
+  underneath it. The card stays live and updates in place through merge/close.
+- **Only PRs that need a review** — a PR is tracked only when its base branch actually requires an
+  approval (protected via branch protection or a ruleset). PRs into unprotected branches like
+  `dev` are ignored automatically — no per-repo config, it follows each repo's own settings.
+- **GitHub → Slack sync** — PR comments, inline review comments (with code hunks), review verdicts,
+  CI results, and merge-conflict alerts, each posted **as the actual person** (their Slack name and
+  avatar), not a generic bot.
+- **Slack → GitHub actions** — Approve, Comment, and Merge straight from the card; thread replies
+  mirror back to the PR conversation (with an echo guard so nothing double-posts).
+- **Verified identity** — `/pullpod connect` runs a real GitHub OAuth flow, so a Slack user is
+  provably a specific GitHub user. Reviews and merges are submitted **as that user**, and GitHub
+  enforces its own repo permissions. Stored tokens are encrypted at rest.
+- **Merge policy** — the Merge button appears once a PR is *Mergeable* (at least one approval, no
+  outstanding change requests). An optional per-repo allowlist can restrict who may merge.
+- **State at a glance** — a colored card and status tag per state (draft / open / mergeable /
+  merged / closed); the PR title is a link, so a PR stays reachable even after the buttons are gone.
+- **App Home, reminders & digests** — your open PRs and review queue, pause/resume, review time
+  slots, plus cron-driven stale-PR nudges and team digests.
 
 ## Architecture
 
-Node 22 + TypeScript. A single always-on process runs an Express server that hosts both Slack
-(via Bolt's `ExpressReceiver`) and the GitHub webhook endpoint. Webhooks are verified, deduped,
-and pushed onto a pg-boss queue (backed by the same Postgres — no Redis); a worker drains them with per-PR ordering and a Slack
-Tier-2 token-bucket throttle. State lives in Postgres (Supabase). Cron jobs handle reminders and
-digests. See [plan.md](plan.md) §2 for the full diagram.
+Node 22 + TypeScript. A single always-on process runs an Express server that hosts both Slack (via
+Bolt's `ExpressReceiver`) and the GitHub webhook endpoint. Webhooks are verified, deduped, and
+pushed onto a **pg-boss** queue backed by the same Postgres (no Redis); a worker drains them with
+per-PR ordering and a Slack Tier-2 throttle. All state lives in Postgres. Cron jobs handle
+reminders and digests.
 
 ```
 src/
   index.ts            Express + Bolt bootstrap, /healthz
   config.ts           zod-validated env
-  db/                 pg pool, typed repo layer
+  db/                 pg pool, typed repo layer, SQL migrations
   github/
     webhooks.ts       signature verify → dedupe → enqueue
     client.ts         Octokit app-auth
-    handlers/         pr-opened, pr-closed, review, comment, checks, push, reviewers, bots
+    oauth.ts          per-user OAuth (verified identity)
+    repo-rules.ts     "does this base branch require review?" detection
+    handlers/         pr-opened, pr-closed, review, comment, checks, push, reviewers, card, bots
   slack/
     app.ts            Bolt setup
+    channels.ts       shared-channel + threading ops, posting as the actor
     home.ts           App Home view
-    interactivity.ts  buttons + modals
+    interactivity.ts  card buttons + modals (approve / comment / merge)
     commands.ts       /pullpod
-    two-way.ts        Slack → GitHub mirror
-    blocks/           Block Kit builders
-    channels.ts       channel ops (create/invite/pin/archive, archived-guard, impersonation)
+    blocks/           Block Kit builders (pr-card, events)
   sync/               user-mapping, channel-naming, mergeability
   jobs/               queue, worker, throttle, cron
 ```
 
-## Local setup
+## Setup
 
-**Prerequisites:** Node 22+, a Postgres database (Supabase — also backs the job queue), and
-[ngrok](https://ngrok.com) for a public tunnel.
+PullPod is a shared team service: it runs deployed with a stable public URL, and both the Slack
+app and GitHub App point at that URL. There is no tunnel in the normal flow.
+
+**Prerequisites:** Node 22+ and a Postgres database (which also backs the job queue).
 
 1. **Install & configure**
    ```bash
    npm install
-   cp .env.example .env   # fill in the values (see below)
+   cp .env.example .env   # fill in the values (see .env.example for every key)
    ```
 
-2. **Create the GitHub App** (org `voovostudy`) with the permissions & webhook events in
-   [plan.md](plan.md) §4.2. Set the webhook URL to `https://<ngrok>.ngrok.app/webhooks/github`
-   and a webhook secret. Install it on the repos you want watched. Put the App ID, base64-encoded
-   private key (`base64 -i key.pem`), webhook secret, and installation ID in `.env`.
+2. **Create the Slack app** from [`slack-manifest.yml`](slack-manifest.yml). Install it, copy the
+   bot token + signing secret into `.env`, and invite the bot to your shared channel
+   (`/invite @PullPod`). Set the three request URLs (Events, Interactivity, `/pullpod`) to
+   `https://<service-url>/slack/events` *after* the first deploy — Slack re-verifies the Events
+   URL on save.
 
-3. **Create the Slack app** from [`slack-manifest.yml`](slack-manifest.yml) (replace the
-   `REPLACE_ME` ngrok host first). Install to the workspace and copy the bot token + signing
-   secret into `.env`.
+3. **Create the GitHub App** for your org with the permissions & webhook events in
+   [plan.md](plan.md) §4.2. Point the webhook at `https://<service-url>/webhooks/github` with a
+   secret, and install it on the repos you want watched. Put the App ID, base64-encoded private key
+   (`base64 -i key.pem`), webhook secret, and installation ID into `.env`.
 
-4. **Migrate the database**
+   > For precise review-required detection on repos using **classic branch protection**, grant the
+   > App **Administration: Read**. Repos that enforce reviews via **rulesets** don't need it.
+
+4. **(Optional) Enable verified identity** — create an OAuth-capable GitHub App (or add a callback
+   to the same one) and set `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `TOKEN_ENC_KEY` (32 bytes),
+   and `PUBLIC_URL`. Users then run `/pullpod connect`.
+
+5. **Migrate the database**
    ```bash
    npm run db:migrate
    ```
 
-5. **Run**
-   ```bash
-   ngrok http 3000      # in one terminal
-   npm run dev          # in another
-   ```
+6. **Deploy** — see [`deploy/cloudrun.md`](deploy/cloudrun.md), then wire the URLs from steps 2–3.
 
-6. **Link users** — each teammate runs `/pullpod link <github-username>` (or PullPod auto-matches
-   by email where GitHub exposes a public email).
+## `/pullpod` commands
+
+| Command | What it does |
+|---|---|
+| `/pullpod connect` | Link your GitHub account via OAuth (verified identity) |
+| `/pullpod status` | Show your link status and preferences |
+| `/pullpod pause` / `resume` | Stop / resume being pulled into PR threads |
+| `/pullpod timeslot ...` | Set your review time slots |
+| `/pullpod repos` | List watched repos |
+| `/pullpod repo <name> on\|off` | Enable/disable a repo |
+| `/pullpod refresh-cards` | Re-render existing PR cards |
+| `/pullpod help` | Usage |
 
 ## Scripts
 
@@ -99,14 +127,14 @@ src/
 
 ## Deployment
 
-PullPod is a **shared team service**, so it runs as an always-on deployment with a stable HTTPS
-URL that everyone's Slack workspace and the GitHub org webhooks point at — not a laptop tunnel.
+PullPod is a **shared team service**, so it runs as an always-on deployment with a stable HTTPS URL
+that Slack and the GitHub webhooks point at — not a laptop tunnel.
 
-**Google Cloud Run** is the documented target: see [`deploy/cloudrun.md`](deploy/cloudrun.md) for
-the full walkthrough (Dockerfile build, Secret Manager, the `--min-instances=1 --no-cpu-throttling`
-flags that keep the worker + cron running, and wiring the Slack/GitHub apps to the service URL).
-Any always-on host works the same way (Railway/Fly/Render + a Postgres); `TZ` controls cron
-scheduling (default `Europe/Budapest`).
+[`deploy/cloudrun.md`](deploy/cloudrun.md) documents Google Cloud Run (Dockerfile build, Secret
+Manager, and the `--min-instances=1 --no-cpu-throttling` flags that keep the worker + cron
+running). Any always-on host works the same way (Railway / Fly / Render + a Postgres). Set `TZ` to
+your timezone to control cron scheduling.
 
-> The local-setup steps above (with ngrok) are only for a single developer smoke-testing changes.
-> Because a tunnel dies when that laptop sleeps, it's never how the team runs the app.
+> Iterating locally? `npm run dev` runs the server on `localhost`. A solo dev who needs live
+> webhooks can tunnel temporarily — see [docs/scaling.md](docs/scaling.md) — but that's a dev-loop
+> convenience, never how the team runs it.

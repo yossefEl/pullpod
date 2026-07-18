@@ -1,7 +1,8 @@
 import { logger } from '../../logger.js';
 import { getPrChannel, getMessageLink, insertMessageLink } from '../../db/repo.js';
-import { postIfOpen } from '../../slack/channels.js';
+import { postToPr } from '../../slack/channels.js';
 import { slack } from '../../slack/client.js';
+import { slackAsForGithubLogin } from '../../sync/user-mapping.js';
 import type { KnownBlock } from '@slack/types';
 
 /**
@@ -19,7 +20,7 @@ export async function handleComment(payload: any, kind: 'issue_comment' | 'revie
   if (!prNumber) return;
 
   const pr = await getPrChannel(repoFullName, prNumber);
-  if (!pr || pr.state !== 'open') return;
+  if (!pr) return;
 
   const existing = await getMessageLink(kind, comment.id);
 
@@ -34,7 +35,7 @@ export async function handleComment(payload: any, kind: 'issue_comment' | 'revie
 
   const blocks = commentBlocks(kind, comment);
   const text = `${comment.user.login}: ${String(comment.body ?? '').slice(0, 120)}`;
-  const as = { username: comment.user.login, icon_url: comment.user.avatar_url };
+  const as = await slackAsForGithubLogin(comment.user.login, comment.user.avatar_url);
 
   if (action === 'edited' && existing) {
     await slack.chat
@@ -43,21 +44,16 @@ export async function handleComment(payload: any, kind: 'issue_comment' | 'revie
     return;
   }
 
-  // For review-comment thread replies, thread under the parent comment's Slack ts.
-  let threadTs: string | undefined;
-  if (kind === 'review_comment' && comment.in_reply_to_id) {
-    const parent = await getMessageLink('review_comment', comment.in_reply_to_id);
-    threadTs = parent?.slack_ts;
-  }
-
-  const ts = await postIfOpen(pr.id, blocks, text, { as, thread_ts: threadTs });
+  // All events for a PR land in that PR's single thread (Slack threads are flat,
+  // so inline-reply chains render as sequential replies under the root message).
+  const ts = await postToPr(pr.id, blocks, text, { as });
   if (ts) {
     await insertMessageLink({
       pr_channel_id: pr.id,
       github_kind: kind,
       github_id: comment.id,
       slack_ts: ts,
-      slack_thread_ts: threadTs ?? null,
+      slack_thread_ts: pr.root_ts,
     });
   }
 }

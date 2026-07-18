@@ -2,19 +2,20 @@ import type bolt from '@slack/bolt';
 import { logger } from '../logger.js';
 import { github, splitRepo } from '../github/client.js';
 import {
-  getPrChannelByChannelId,
+  getPrChannelByRootTs,
   getUserLinkBySlack,
   insertMessageLink,
 } from '../db/repo.js';
 
 /**
- * Phase 3 two-way sync: mirror human, top-level messages in a PR pod channel
- * into the PR as a GitHub issue comment.
+ * Two-way sync: a human reply inside a PR's thread mirrors back to the PR as a
+ * GitHub issue comment. (The PR conversation now lives in one thread per PR in
+ * the shared channel, so the thread reply — not a top-level post — is the signal.)
  *
  * Echo-loop prevention:
  *  - Skip anything with a subtype or bot_id (that's PullPod's own output, or
  *    channel-join noise), so our GitHub->Slack posts never bounce back.
- *  - Skip threaded replies (they're usually reactions to synced content).
+ *  - Only act on replies whose thread parent is a known PR root message.
  *  - Record the created GitHub comment id in message_links; the GitHub webhook
  *    handler sees the existing link on the 'created' event and drops it.
  */
@@ -22,10 +23,10 @@ export function registerTwoWaySync(app: bolt.App): void {
   app.message(async ({ message }) => {
     const m = message as any;
     if (m.subtype || m.bot_id || !m.user || !m.text) return; // only real human posts
-    if (m.thread_ts && m.thread_ts !== m.ts) return; // skip thread replies
+    if (!m.thread_ts || m.thread_ts === m.ts) return; // only replies inside a thread
 
-    const pr = await getPrChannelByChannelId(m.channel);
-    if (!pr || pr.state !== 'open' || pr.pr_number < 0) return;
+    const pr = await getPrChannelByRootTs(m.thread_ts);
+    if (!pr || pr.pr_number < 0) return;
 
     const link = await getUserLinkBySlack(m.user);
     const attribution = link ? `@${link.github_login}` : `a teammate`;
@@ -44,7 +45,7 @@ export function registerTwoWaySync(app: bolt.App): void {
         github_kind: 'issue_comment',
         github_id: data.id,
         slack_ts: m.ts,
-        slack_thread_ts: null,
+        slack_thread_ts: m.thread_ts,
       });
     } catch (err) {
       logger.warn({ err, repo: pr.repo_full_name, pr: pr.pr_number }, 'slack->github mirror failed');

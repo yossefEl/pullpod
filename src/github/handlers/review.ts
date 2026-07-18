@@ -1,6 +1,8 @@
 import { getPrChannel, insertMessageLink, setFirstReviewIfUnset } from '../../db/repo.js';
-import { postIfOpen } from '../../slack/channels.js';
+import { postToPr } from '../../slack/channels.js';
 import { reviewBlocks } from '../../slack/blocks/events.js';
+import { refreshRootCard } from './card.js';
+import { slackAsForGithubLogin } from '../../sync/user-mapping.js';
 
 /** Handles pull_request_review submitted (approved / changes_requested / commented). */
 export async function handleReview(payload: any): Promise<void> {
@@ -10,7 +12,7 @@ export async function handleReview(payload: any): Promise<void> {
   const prNumber: number = payload.pull_request.number;
 
   const pr = await getPrChannel(repoFullName, prNumber);
-  if (!pr || pr.state !== 'open') return;
+  if (!pr) return;
 
   const rawState = String(review.state ?? '').toLowerCase();
   // GitHub uses 'approved' | 'changes_requested' | 'commented' | 'dismissed'.
@@ -29,9 +31,8 @@ export async function handleReview(payload: any): Promise<void> {
   await setFirstReviewIfUnset(pr.id, review.submitted_at ?? new Date().toISOString());
 
   const blocks = reviewBlocks(state, review.user.login, review.body ?? null, review.html_url);
-  const ts = await postIfOpen(pr.id, blocks, `${review.user.login} ${state}`, {
-    as: { username: review.user.login, icon_url: review.user.avatar_url },
-  });
+  const as = await slackAsForGithubLogin(review.user.login, review.user.avatar_url);
+  const ts = await postToPr(pr.id, blocks, `${review.user.login} ${state}`, { as });
   if (ts) {
     await insertMessageLink({
       pr_channel_id: pr.id,
@@ -41,4 +42,7 @@ export async function handleReview(payload: any): Promise<void> {
       slack_thread_ts: null,
     });
   }
+
+  // Keep the root card's reviewer/approval status live.
+  await refreshRootCard(pr);
 }

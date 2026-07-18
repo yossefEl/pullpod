@@ -1,25 +1,24 @@
 import { logger } from '../../logger.js';
+import { config } from '../../config.js';
 import {
   getPrChannel,
   getRepoConfig,
-  insertPrChannel,
+  reservePrChannel,
   updatePrChannel,
   upsertRepoConfig,
 } from '../../db/repo.js';
-import { resolveGithubLogins, slackUserForGithubLogin } from '../../sync/user-mapping.js';
-import { buildChannelName, uniqueChannelName } from '../../sync/channel-naming.js';
+import { resolveGithubLogins, slackAsForGithubLogin, slackUserForGithubLogin } from '../../sync/user-mapping.js';
 import {
-  createChannel,
+  ensureApproveChannel,
   inviteUsers,
-  pinMessage,
   postMessage,
+  postRootCard,
+  postToPr,
   prLock,
-  setPrBookmark,
-  setTopic,
-  unarchiveChannel,
 } from '../../slack/channels.js';
-import { prCardBlocks } from '../../slack/blocks/pr-card.js';
-import { getBotPoolChannel, isBotAuthor } from './bots.js';
+import { prCard } from '../../slack/blocks/pr-card.js';
+import { isBotAuthor } from './bots.js';
+import { baseRequiresReview } from '../repo-rules.js';
 
 /** Handles pull_request opened / reopened / ready_for_review. */
 export async function handlePrOpened(payload: any): Promise<void> {
@@ -36,56 +35,68 @@ export async function handlePrOpened(payload: any): Promise<void> {
       return;
     }
 
-    // Reopen: unarchive existing channel if we still have it.
+    // Already tracked: reopen or clear draft flag on the existing thread.
     const existing = await getPrChannel(repoFullName, prNumber);
     if (existing) {
-      if (action === 'reopened' && existing.state === 'archived') {
-        await unarchiveChannel(existing.channel_id);
+      if (action === 'reopened' && existing.state !== 'open') {
         await updatePrChannel(existing.id, { state: 'open', closed_at: null, merged: null });
-        await postMessage(
-          existing.channel_id,
+        await postToPr(
+          existing.id,
           [{ type: 'section', text: { type: 'mrkdwn', text: '♻️ *PR reopened.*' } }],
           'PR reopened',
         );
       }
-      // ready_for_review on an already-tracked PR just clears the draft flag.
       if (action === 'ready_for_review') {
         await updatePrChannel(existing.id, { is_draft: false });
       }
       return;
     }
 
-    // Draft PRs: wait for ready_for_review before creating a channel.
-    if (pr.draft && repoConfig.skip_draft && action !== 'ready_for_review') {
-      logger.info({ repoFullName, prNumber }, 'draft PR, deferring channel creation');
+    // Only track PRs whose base (target) branch actually requires an approval
+    // (protected to require PR reviews). Unprotected branches like `dev` or
+    // feature branches are skipped — following each repo's own GitHub settings.
+    const baseRef: string = pr.base?.ref ?? '';
+    if (!(await baseRequiresReview(repoFullName, baseRef))) {
+      logger.info({ repoFullName, prNumber, baseRef }, 'base branch does not require review, skipping');
       return;
     }
 
-    // Bot PRs (Dependabot/Renovate): pool or skip per config.
-    if (isBotAuthor(pr.user)) {
-      if (repoConfig.bot_pr_strategy === 'skip') return;
-      if (repoConfig.bot_pr_strategy === 'pool') {
-        await getBotPoolChannel(repoConfig, pr);
-        return;
-      }
-      // 'channel' falls through to normal per-PR channel creation.
+    // Draft PRs: wait for ready_for_review before posting.
+    if (pr.draft && repoConfig.skip_draft && action !== 'ready_for_review') {
+      logger.info({ repoFullName, prNumber }, 'draft PR, deferring root message');
+      return;
     }
 
-    await createPodChannel(repoConfig, payload);
+    // Bot PRs (Dependabot/Renovate): 'skip' drops them; otherwise post like any PR.
+    if (isBotAuthor(pr.user) && repoConfig.bot_pr_strategy === 'skip') return;
+
+    await postPrRoot(payload);
   });
 }
 
-async function createPodChannel(repoConfig: any, payload: any): Promise<void> {
+/** Post a PR's root message into the shared channel and record it as a thread parent. */
+async function postPrRoot(payload: any): Promise<void> {
   const pr = payload.pull_request;
   const repoFullName: string = payload.repository.full_name;
   const prNumber: number = pr.number;
 
-  const base = buildChannelName(repoConfig.channel_prefix, repoFullName, prNumber, pr.title);
-  const name = await uniqueChannelName(base);
+  const channelId = await ensureApproveChannel();
 
-  const channelId = await createChannel(name);
-  if (!channelId) {
-    logger.warn({ name }, 'channel creation returned null (name_taken race); aborting');
+  // Reserve the row BEFORE posting. If another delivery/retry already reserved it,
+  // this returns null and we skip — so we never post a duplicate root message.
+  const row = await reservePrChannel({
+    repo_full_name: repoFullName,
+    pr_number: prNumber,
+    channel_id: channelId,
+    channel_name: config.PR_CHANNEL_NAME,
+    pr_title: pr.title,
+    pr_author_login: pr.user.login,
+    pr_url: pr.html_url,
+    is_draft: !!pr.draft,
+    opened_at: pr.created_at,
+  });
+  if (!row) {
+    logger.info({ repoFullName, prNumber }, 'PR thread already reserved; skipping duplicate');
     return;
   }
 
@@ -94,17 +105,17 @@ async function createPodChannel(repoConfig: any, payload: any): Promise<void> {
   const { slackIds: reviewerSlackIds, unmapped: unmappedReviewers } =
     await resolveGithubLogins(requestedReviewers);
 
+  // Pull mapped people into the shared channel so the thread shows up for them.
   await inviteUsers(channelId, [authorSlackId, ...reviewerSlackIds].filter(Boolean) as string[]);
-  await setTopic(channelId, `${pr.title} — ${pr.html_url}`);
-  await setPrBookmark(channelId, pr.html_url);
 
-  const blocks = prCardBlocks({
+  const card = prCard({
     title: pr.title,
     url: pr.html_url,
     number: prNumber,
     repoFullName,
     authorLogin: pr.user.login,
     authorSlackId,
+    authorAvatarUrl: pr.user?.avatar_url,
     reviewerSlackIds,
     unmappedReviewers,
     additions: pr.additions ?? 0,
@@ -115,20 +126,31 @@ async function createPodChannel(repoConfig: any, payload: any): Promise<void> {
     body: pr.body,
   });
 
-  const ts = await postMessage(channelId, blocks, `PR #${prNumber}: ${pr.title}`);
-  if (ts) await pinMessage(channelId, ts);
+  const authorAs = await slackAsForGithubLogin(pr.user.login, pr.user?.avatar_url);
+  const rootTs = await postRootCard(channelId, card, `PR #${prNumber}: ${pr.title}`, { as: authorAs });
+  if (!rootTs) {
+    logger.warn({ repoFullName, prNumber }, 'root message post returned no ts');
+    return;
+  }
+  await updatePrChannel(row.id, { root_ts: rootTs });
 
-  await insertPrChannel({
-    repo_full_name: repoFullName,
-    pr_number: prNumber,
-    channel_id: channelId,
-    channel_name: name,
-    pr_title: pr.title,
-    pr_author_login: pr.user.login,
-    pr_url: pr.html_url,
-    is_draft: !!pr.draft,
-    opened_at: pr.created_at,
-  });
+  // Unmapped author: leave a self-serve nudge in the thread so the channel isn't a mystery.
+  if (!authorSlackId) {
+    await postMessage(
+      channelId,
+      [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `⚠️ Couldn't match GitHub user \`${pr.user.login}\` to a Slack account. Run \`/pullpod connect\` to be added automatically to your PR threads.`,
+          },
+        },
+      ],
+      'Link your GitHub account',
+      { thread_ts: rootTs },
+    );
+  }
 
-  logger.info({ repoFullName, prNumber, channelId, name }, 'created PR pod channel');
+  logger.info({ repoFullName, prNumber, channelId, rootTs }, 'posted PR root message');
 }

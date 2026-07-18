@@ -1,6 +1,6 @@
 # PullPod — Technical Plan
 
-> **PullPod** — a pod for every pull request. An internal Slack ↔ GitHub app for the Voovo team,
+> **PullPod** — a pod for every pull request. An internal Slack ↔ GitHub app for your team,
 > modeled on [Axolo](https://axolo.co): every PR gets its own ephemeral Slack channel that syncs
 > comments, reviews, and CI status, then archives itself on merge.
 >
@@ -25,7 +25,7 @@
 - ❌ Multi-workspace Slack OAuth distribution / Slack App Directory listing
 - ❌ Billing, marketing site, admin dashboard
 - ❌ GitLab support
-- ❌ Multi-tenancy — **single Slack workspace (Voovostudy), single GitHub org installation**
+- ❌ Multi-tenancy — **single Slack workspace (your workspace), single GitHub org installation**
 
 Being internal-only simplifies a lot: bot token and GitHub App installation ID live in env/config,
 no OAuth install flow, no tenant isolation. We still keep an `installations` row so the schema
@@ -44,7 +44,7 @@ doesn't need surgery if this ever goes multi-tenant.
 ```
                     ┌────────────────────────────────────────────┐
  GitHub App         │              PullPod backend               │        Slack App
- (org install)      │        Node 22 + TypeScript                │     (Voovostudy)
+ (org install)      │        Node 22 + TypeScript                │     (your workspace)
                     │                                            │
  webhooks ─────────▶│  Express: /webhooks/github  ── verify sig  │◀───── Events API /slack/events
                     │  Bolt JS:  /slack/events, interactivity,   │◀───── Interactivity (buttons,
@@ -115,7 +115,7 @@ create table user_prefs (
   paused            boolean not null default false,        -- "Pause PullPod"
   timeslot_start    time,                                  -- review notification window
   timeslot_end      time,
-  timezone          text not null default 'Europe/Budapest',
+  timezone          text not null default 'UTC',
   notify_ci         boolean not null default true,
   updated_at        timestamptz not null default now()
 );
@@ -123,7 +123,7 @@ create table user_prefs (
 -- Which repos are active and how they behave.
 create table repo_configs (
   id                  bigint generated always as identity primary key,
-  repo_full_name      text not null unique,                -- e.g. 'voovostudy/voovo-mobile'
+  repo_full_name      text not null unique,                -- e.g. 'your-org/web'
   enabled             boolean not null default true,
   team_channel_id     text,                                -- digest / announcements channel
   channel_prefix      text not null default '_pr',
@@ -189,7 +189,7 @@ create table processed_events (
 - **Slash command**: `/pullpod` → subcommands `link`, `pause`, `resume`, `timeslot`, `status`, `help`
 - **App Home**: Home tab enabled
 
-### 4.2 GitHub App (org: `voovostudy`, installed on selected repos)
+### 4.2 GitHub App (org: `your-org`, installed on selected repos)
 
 - **Permissions**: Pull requests (R/W), Checks (Read), Commit statuses (Read), Contents (Read),
   Members (Read), Deployments (Read), Metadata (Read)
@@ -202,7 +202,7 @@ create table processed_events (
 ### 4.3 Channel naming
 
 `_pr_<repo-short>_<pr-number>_<slugified-title>` truncated to Slack's 80-char limit, e.g.
-`_pr_voovo-mobile_660_fix_cu-869dy77d0-offering` (mirrors the Axolo pattern in the screenshot —
+`_pr_web_660_fix_cu-869dy77d0-offering` (mirrors the Axolo pattern in the screenshot —
 the leading `_` keeps PR pods sorted together and out of the way in the sidebar).
 On `name_taken` (archived channels hold their names forever): append `-2`, `-3`, …
 
@@ -330,7 +330,7 @@ pullpod/
 | # | Task | Done when |
 |---|---|---|
 | 1.1 | Repo scaffold: TS, ESLint, Vitest, Express+Bolt boot, `/healthz` | App runs locally |
-| 1.2 | Slack app from manifest (dev + prod), GitHub App created & installed on `voovo-mobile` | Webhooks arrive via ngrok |
+| 1.2 | Slack app from manifest (dev + prod), GitHub App created & installed on `web` | Webhooks arrive via ngrok |
 | 1.3 | Supabase migrations (§3) + typed db layer | Migration applies cleanly |
 | 1.4 | GitHub webhook receiver: verify, dedupe, enqueue; pg-boss worker | Redelivered events are no-ops |
 | 1.5 | PR opened → channel + invites + PR card + pin/bookmark | New PR produces a working pod |
@@ -347,7 +347,7 @@ pullpod/
 | 2.2 | Approve / Request changes / Comment buttons + modals → GitHub reviews |
 | 2.3 | Draft handling (`skip_draft`), reviewer-added-later invites, `ready_for_review` trigger |
 | 2.4 | Bot PR strategy: pool Dependabot/Renovate into `#_pr_bots` |
-| 2.5 | Repo onboarding via `/pullpod repos` (enable/disable, set team channel) + roll out to `voovo-content-platform` |
+| 2.5 | Repo onboarding via `/pullpod repos` (enable/disable, set team channel) + roll out to `content-platform` |
 | 2.6 | Slack rate-limit hardening: tier-2 throttle in queue, burst test with 20 simultaneous PRs |
 
 ### Phase 3 — Retention & polish (target: ~1–1.5 weeks)
@@ -383,7 +383,7 @@ SLACK_BOT_TOKEN=xoxb-…            SLACK_SIGNING_SECRET=…
 GITHUB_APP_ID=…                   GITHUB_APP_PRIVATE_KEY=…  (base64)
 GITHUB_WEBHOOK_SECRET=…           GITHUB_INSTALLATION_ID=…
 DATABASE_URL=…  (Supabase, also backs the pg-boss queue)
-SENTRY_DSN=…  (Phase 3)           TZ=Europe/Budapest
+SENTRY_DSN=…  (Phase 3)           TZ=UTC
 ```
 
 Secrets live in Cloud Run (Secret Manager); `.env.example` checked in, `.env` gitignored.

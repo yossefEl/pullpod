@@ -2,8 +2,20 @@ export interface UserLink {
   id: number;
   github_login: string;
   slack_user_id: string;
-  matched_by: 'email' | 'manual';
+  matched_by: 'email' | 'manual' | 'oauth';
   created_at: string;
+}
+
+/** A verified GitHub identity (via OAuth) plus the encrypted token to act as them. */
+export interface GithubIdentity {
+  slack_user_id: string;
+  github_login: string;
+  github_user_id: number;
+  access_token_enc: string;
+  refresh_token_enc: string | null;
+  expires_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface UserPrefs {
@@ -31,8 +43,11 @@ export interface PrChannel {
   id: number;
   repo_full_name: string;
   pr_number: number;
+  /** The shared pr-approve channel (same for every PR). */
   channel_id: string;
   channel_name: string;
+  /** ts of this PR's root message in the shared channel — the thread parent. */
+  root_ts: string | null;
   state: 'open' | 'archived';
   pr_title: string;
   pr_author_login: string;

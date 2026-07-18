@@ -3,7 +3,7 @@ import type { WebClient } from '@slack/web-api';
 import type { KnownBlock } from '@slack/types';
 import { logger } from '../logger.js';
 import { github } from '../github/client.js';
-import { getPrChannel, getUserLinkBySlack, getUserPrefs } from '../db/repo.js';
+import { getPrChannel, getGithubIdentityBySlack, getUserPrefs } from '../db/repo.js';
 import { config } from '../config.js';
 
 interface PrItem {
@@ -33,7 +33,7 @@ export async function publishHome(client: WebClient, slackUserId: string): Promi
 }
 
 async function buildHomeView(slackUserId: string): Promise<any> {
-  const link = await getUserLinkBySlack(slackUserId);
+  const identity = await getGithubIdentityBySlack(slackUserId);
   const prefs = await getUserPrefs(slackUserId);
 
   const blocks: KnownBlock[] = [
@@ -41,22 +41,20 @@ async function buildHomeView(slackUserId: string): Promise<any> {
     { type: 'section', text: { type: 'mrkdwn', text: '*⚙️ Settings*' } },
   ];
 
-  // GitHub link status.
+  // GitHub connection status (verified via OAuth).
   blocks.push({
     type: 'section',
     text: {
       type: 'mrkdwn',
-      text: link
-        ? `✅ Linked to GitHub as \`${link.github_login}\``
-        : '⚠️ *Not linked to GitHub.* Run `/pullpod link <your-github-username>` so I can invite you to PR channels.',
+      text: identity
+        ? `✅ Connected to GitHub as \`${identity.github_login}\``
+        : '⚠️ *GitHub not connected.* Run `/pullpod connect` to authorize — then your approvals post as you and I can add you to PR threads.',
     },
-    accessory: link
-      ? {
-          type: 'button',
-          text: { type: 'plain_text', text: 'Re-link GitHub' },
-          action_id: 'home_relink',
-        }
-      : undefined,
+    accessory: {
+      type: 'button',
+      text: { type: 'plain_text', text: identity ? 'Reconnect GitHub' : 'Connect GitHub' },
+      action_id: 'home_relink',
+    },
   });
 
   // Pause / resume + time slots + CI toggle.
@@ -96,18 +94,18 @@ async function buildHomeView(slackUserId: string): Promise<any> {
     { type: 'divider' },
   );
 
-  if (!link) {
+  if (!identity) {
     blocks.push({
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: 'Link your GitHub account to see your pull requests here.' }],
+      elements: [{ type: 'mrkdwn', text: 'Connect your GitHub account to see your pull requests here.' }],
     });
     return { type: 'home', blocks };
   }
 
   // PR lists.
   const [awaitingReview, mine] = await Promise.all([
-    searchPrs(`is:open is:pr review-requested:${link.github_login} org:${config.GITHUB_ORG}`),
-    searchPrs(`is:open is:pr author:${link.github_login} org:${config.GITHUB_ORG}`),
+    searchPrs(`is:open is:pr review-requested:${identity.github_login} org:${config.GITHUB_ORG}`),
+    searchPrs(`is:open is:pr author:${identity.github_login} org:${config.GITHUB_ORG}`),
   ]);
 
   blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*🧐 PRs awaiting your review*' } });
